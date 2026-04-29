@@ -1,0 +1,23 @@
+{
+  "name": "tell-me",
+  "version": "1.0.0",
+  "description": "Vanilla JS captcha-style challenge demo with token verification",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node -e \"console.log('no tests configured')\""
+  },
+  "keywords": [
+    "captcha",
+    "challenge",
+    "token",
+    "express",
+    "vanilla-js"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}

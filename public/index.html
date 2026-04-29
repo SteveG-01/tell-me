@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tell Me Demo</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="card hero">
+        <span class="eyebrow">Vanilla challenge widget</span>
+        <h1>Tell Me</h1>
+        <p class="lede">
+          A modular slider-and-input verification flow for contact forms, redirects, and embed-ready sites.
+        </p>
+
+        <div class="mode-row">
+          <button class="mode-button is-active" data-mode="form" type="button">Form unlock</button>
+          <button class="mode-button" data-mode="redirect" type="button">Redirect token</button>
+        </div>
+
+        <div class="challenge-type-row" aria-label="Challenge type selector">
+          <button class="mode-button is-active" data-challenge-type="slider" type="button">Slider</button>
+          <button class="mode-button" data-challenge-type="riddle" type="button">Riddle</button>
+        </div>
+
+        <form id="contactForm" class="demo-form">
+          <div class="field-grid">
+            <label>
+              Name
+              <input name="name" type="text" placeholder="Bob" required />
+            </label>
+            <label>
+              Email
+              <input name="email" type="email" placeholder="bob@example.com" required />
+            </label>
+          </div>
+
+          <label>
+            Message
+            <textarea name="message" rows="5" placeholder="Tell us what's on your mind..." required></textarea>
+          </label>
+
+          <label class="trap-field" aria-hidden="true">
+            Leave this field empty
+            <input id="trapField" name="trapField" type="text" tabindex="-1" autocomplete="off" />
+          </label>
+
+          <div class="challenge-card">
+            <div class="challenge-copy">
+              <span class="eyebrow subtle">Human check</span>
+              <h2 id="challengeTitle">Follow the instructions</h2>
+              <p id="challengePrompt"></p>
+            </div>
+
+            <div id="challengeBody" class="challenge-body">
+              <div class="target-pill" aria-live="polite">
+                Target value
+                <strong id="targetValue">--</strong>
+              </div>
+
+              <div class="current-pill" aria-live="polite">
+                Current slider value
+                <strong id="currentValue">--</strong>
+              </div>
+
+              <div class="slider-wrap">
+                <input id="slider" type="range" min="1" max="20" value="1" />
+                <div class="slider-labels">
+                  <span>1</span>
+                  <span>20</span>
+                </div>
+              </div>
+            </div>
+
+            <label id="typedLabel">
+              Type the same value
+              <input id="typedValue" name="typedValue" type="text" inputmode="numeric" autocomplete="off" placeholder="Enter the slider value" />
+            </label>
+
+            <div class="challenge-actions">
+              <button id="verifyButton" class="primary-button" type="submit">Verify and continue</button>
+              <span id="status" class="status" aria-live="polite"></span>
+            </div>
+          </div>
+
+          <div class="submit-row">
+            <button id="sendButton" class="primary-button send-button" type="submit" disabled>Send message</button>
+            <a id="redirectLink" class="button-link hidden" href="/thanks" aria-disabled="true">Go to tokened thanks page</a>
+          </div>
+        </form>
+      </section>
+
+      <section class="card side-card">
+        <span class="eyebrow subtle">What this prototype includes</span>
+        <ul class="feature-list">
+          <li>Slider target challenge</li>
+          <li>Typed value matching</li>
+          <li>Server-issued success token</li>
+          <li>Redirect mode and form-unlock mode</li>
+          <li>Portable vanilla JS structure</li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>
