@@ -2,16 +2,12 @@ const express = require("express");
 const crypto = require("crypto");
 const config = require("./config");
 const { getChallengeFactory } = require("./challenge");
+const { createStorage } = require("./storage/state");
 
 const app = express();
 
 app.use(express.json());
 app.use(express.static(config.publicDir));
-
-const activeChallenges = new Map();
-const issuedTokens = new Map();
-const requestBuckets = new Map();
-const failureBuckets = new Map();
 
 const challengeRateLimit = {
   windowMs: Number(process.env.CHALLENGE_RATE_LIMIT_WINDOW_MS || 60 * 1000),
@@ -35,6 +31,8 @@ const cleanupIntervals = {
   requestBucketsMs: Number(process.env.RATE_BUCKET_CLEANUP_INTERVAL_MS || 60 * 1000),
   failureBucketsMs: Number(process.env.FAILURE_BUCKET_CLEANUP_INTERVAL_MS || 60 * 1000),
 };
+
+let storage = null;
 
 function signToken(payload) {
   return crypto.createHmac("sha256", config.security.secret).update(payload).digest("hex");
@@ -74,22 +72,23 @@ function getSessionCookieHeader(sessionId) {
   return parts.join("; ");
 }
 
-function getRateBucket(store, key, windowMs) {
+async function getRateBucket(store, key, windowMs) {
   const now = Date.now();
-  const bucket = store.get(key);
+  const bucket = await store.get(key);
 
   if (!bucket || now > bucket.resetAt) {
     const freshBucket = { count: 0, resetAt: now + windowMs };
-    store.set(key, freshBucket);
+    await store.set(key, freshBucket);
     return freshBucket;
   }
 
   return bucket;
 }
 
-function rateLimit(store, key, windowMs, max) {
-  const bucket = getRateBucket(store, key, windowMs);
+async function rateLimit(store, key, windowMs, max) {
+  const bucket = await getRateBucket(store, key, windowMs);
   bucket.count += 1;
+  await store.set(key, bucket);
   return {
     allowed: bucket.count <= max,
     remaining: Math.max(0, max - bucket.count),
@@ -97,38 +96,40 @@ function rateLimit(store, key, windowMs, max) {
   };
 }
 
-function getFailureRecord(key) {
+async function getFailureRecord(key) {
   const now = Date.now();
-  const record = failureBuckets.get(key);
+  const record = await storage.failureBuckets.get(key);
 
   if (!record || now > record.resetAt) {
     const freshRecord = { count: 0, blockedUntil: 0, resetAt: now + failureThrottle.windowMs };
-    failureBuckets.set(key, freshRecord);
+    await storage.failureBuckets.set(key, freshRecord);
     return freshRecord;
   }
 
   return record;
 }
 
-function recordFailure(key) {
-  const record = getFailureRecord(key);
+async function recordFailure(key) {
+  const record = await getFailureRecord(key);
   record.count += 1;
 
   if (record.count >= failureThrottle.max) {
     record.blockedUntil = Date.now() + failureThrottle.blockMs;
   }
+
+  await storage.failureBuckets.set(key, record);
 }
 
-function clearFailures(key) {
-  failureBuckets.delete(key);
+async function clearFailures(key) {
+  await storage.failureBuckets.del(key);
 }
 
-function isThrottled(key) {
-  const record = getFailureRecord(key);
+async function isThrottled(key) {
+  const record = await getFailureRecord(key);
   return record.blockedUntil > Date.now();
 }
 
-function createChallenge(requestedType, sessionId) {
+async function createChallenge(requestedType, sessionId) {
   const requested = Array.isArray(requestedType) ? requestedType[0] : requestedType;
   const fallbackType = config.challenge.defaultType || config.challenge.types[0] || "slider";
   const challengeType = config.challenge.types.includes(requested) ? requested : fallbackType;
@@ -139,7 +140,7 @@ function createChallenge(requestedType, sessionId) {
   const issuedAt = Date.now();
   const expiresAt = issuedAt + config.challenge.ttlMs;
 
-  activeChallenges.set(challengeId, {
+  await storage.activeChallenges.set(challengeId, {
     challengeId,
     type: challengeData.type,
     prompt: challengeData.prompt,
@@ -164,7 +165,7 @@ function createChallenge(requestedType, sessionId) {
   };
 }
 
-function issueSuccessToken(challenge, answer) {
+async function issueSuccessToken(challenge, answer) {
   const payload = JSON.stringify({
     challengeId: challenge.challengeId,
     answer,
@@ -178,7 +179,7 @@ function issueSuccessToken(challenge, answer) {
   const encoded = Buffer.from(payload).toString("base64url");
   const token = `${encoded}.${signature}`;
 
-  issuedTokens.set(token, {
+  await storage.issuedTokens.set(token, {
     challengeId: challenge.challengeId,
     expiresAt: challenge.expiresAt,
     used: false,
@@ -188,12 +189,12 @@ function issueSuccessToken(challenge, answer) {
   return token;
 }
 
-function verifySuccessToken(token) {
+async function verifySuccessToken(token) {
   if (typeof token !== "string" || !token.includes(".")) {
     return { ok: false, error: "Malformed token" };
   }
 
-  const record = issuedTokens.get(token);
+  const record = await storage.issuedTokens.get(token);
   if (!record) {
     return { ok: false, error: "Token not recognized" };
   }
@@ -214,7 +215,7 @@ function verifySuccessToken(token) {
   }
 
   if (Date.now() > record.expiresAt) {
-    issuedTokens.delete(token);
+    await storage.issuedTokens.del(token);
     return { ok: false, error: "Token expired" };
   }
 
@@ -225,39 +226,28 @@ function verifySuccessToken(token) {
   return { ok: true, payload };
 }
 
-function getStoreSize(store) {
-  return store instanceof Map ? store.size : 0;
+async function getStoreSize(store) {
+  return store.size();
 }
 
-function pruneExpiredEntries(store, isExpired) {
-  const now = Date.now();
-  for (const [key, value] of store.entries()) {
-    if (isExpired(value, now)) {
-      store.delete(key);
-    }
-  }
+async function pruneState() {
+  await storage.activeChallenges.prune((challenge, now) => now > challenge.expiresAt || challenge.solved);
+  await storage.issuedTokens.prune((tokenRecord, now) => now > tokenRecord.expiresAt || tokenRecord.used);
+  await storage.requestBuckets.prune((bucket, now) => now > bucket.resetAt);
+  await storage.failureBuckets.prune((record, now) => now > record.resetAt && now > record.blockedUntil);
 }
 
-function pruneState() {
-  pruneExpiredEntries(activeChallenges, (challenge, now) => now > challenge.expiresAt || challenge.solved);
-  pruneExpiredEntries(issuedTokens, (tokenRecord, now) => now > tokenRecord.expiresAt || tokenRecord.used);
-  pruneExpiredEntries(requestBuckets, (bucket, now) => now > bucket.resetAt);
-  pruneExpiredEntries(failureBuckets, (record, now) => now > record.resetAt && now > record.blockedUntil);
-}
-
-setInterval(pruneState, Math.min(cleanupIntervals.activeChallengesMs, cleanupIntervals.issuedTokensMs, cleanupIntervals.requestBucketsMs, cleanupIntervals.failureBucketsMs)).unref();
-
-app.get("/api/stats", (req, res) => {
+app.get("/api/stats", async (req, res) => {
   if (process.env.EXPOSE_STATS !== "true") {
     return res.status(404).json({ ok: false, error: "Not found" });
   }
 
   res.json({
     ok: true,
-    activeChallenges: getStoreSize(activeChallenges),
-    issuedTokens: getStoreSize(issuedTokens),
-    requestBuckets: getStoreSize(requestBuckets),
-    failureBuckets: getStoreSize(failureBuckets),
+    activeChallenges: await getStoreSize(storage.activeChallenges),
+    issuedTokens: await getStoreSize(storage.issuedTokens),
+    requestBuckets: await getStoreSize(storage.requestBuckets),
+    failureBuckets: await getStoreSize(storage.failureBuckets),
     challengeRateLimit: {
       windowMs: challengeRateLimit.windowMs,
       max: challengeRateLimit.max,
@@ -274,9 +264,9 @@ app.get("/api/stats", (req, res) => {
   });
 });
 
-app.get("/api/challenge", (req, res) => {
+app.get("/api/challenge", async (req, res) => {
   const clientKey = getClientKey(req);
-  const limited = rateLimit(requestBuckets, `${clientKey}:challenge`, challengeRateLimit.windowMs, challengeRateLimit.max);
+  const limited = await rateLimit(storage.requestBuckets, `${clientKey}:challenge`, challengeRateLimit.windowMs, challengeRateLimit.max);
 
   if (!limited.allowed) {
     return res.status(429).json({
@@ -286,7 +276,7 @@ app.get("/api/challenge", (req, res) => {
     });
   }
 
-  if (isThrottled(`${clientKey}:verify`)) {
+  if (await isThrottled(`${clientKey}:verify`)) {
     return res.status(429).json({
       ok: false,
       error: "Temporary abuse throttle active",
@@ -295,12 +285,12 @@ app.get("/api/challenge", (req, res) => {
 
   const sessionId = getSessionId(req);
   res.setHeader("Set-Cookie", getSessionCookieHeader(sessionId));
-  res.json(createChallenge(req.query.type, sessionId));
+  res.json(await createChallenge(req.query.type, sessionId));
 });
 
-app.post("/api/verify", (req, res) => {
+app.post("/api/verify", async (req, res) => {
   const clientKey = getClientKey(req);
-  const limited = rateLimit(requestBuckets, `${clientKey}:verify`, verifyRateLimit.windowMs, verifyRateLimit.max);
+  const limited = await rateLimit(storage.requestBuckets, `${clientKey}:verify`, verifyRateLimit.windowMs, verifyRateLimit.max);
 
   if (!limited.allowed) {
     return res.status(429).json({
@@ -310,7 +300,7 @@ app.post("/api/verify", (req, res) => {
     });
   }
 
-  if (isThrottled(`${clientKey}:verify`)) {
+  if (await isThrottled(`${clientKey}:verify`)) {
     return res.status(429).json({
       ok: false,
       error: "Temporary abuse throttle active",
@@ -321,40 +311,40 @@ app.post("/api/verify", (req, res) => {
   const { challengeId, typedValue, sliderValue, redirectMode, trapField, startedAt } = req.body || {};
 
   if (trapField) {
-    recordFailure(`${clientKey}:verify`);
+    await recordFailure(`${clientKey}:verify`);
     return res.status(400).json({ ok: false, error: "Invalid submission" });
   }
 
   if (typeof startedAt === "number" && Date.now() - startedAt < 800) {
-    recordFailure(`${clientKey}:verify`);
+    await recordFailure(`${clientKey}:verify`);
     return res.status(400).json({ ok: false, error: "Submission too fast" });
   }
 
-  const challenge = activeChallenges.get(challengeId);
+  const challenge = await storage.activeChallenges.get(challengeId);
 
   if (!challenge) {
-    recordFailure(`${clientKey}:verify`);
+    await recordFailure(`${clientKey}:verify`);
     return res.status(400).json({ ok: false, error: "Invalid challenge" });
   }
 
   if (challenge.issuedTo && challenge.issuedTo !== sessionId) {
-    recordFailure(`${clientKey}:verify`);
+    await recordFailure(`${clientKey}:verify`);
     return res.status(400).json({ ok: false, error: "Challenge bound to a different client" });
   }
 
   if (!sessionId || challenge.issuedTo !== sessionId) {
-    recordFailure(`${clientKey}:verify`);
+    await recordFailure(`${clientKey}:verify`);
     return res.status(400).json({ ok: false, error: "Challenge bound to a different client" });
   }
 
   if (challenge.solved) {
-    recordFailure(`${clientKey}:verify`);
+    await recordFailure(`${clientKey}:verify`);
     return res.status(400).json({ ok: false, error: "Challenge already solved" });
   }
 
   if (Date.now() > challenge.expiresAt) {
-    activeChallenges.delete(challengeId);
-    recordFailure(`${clientKey}:verify`);
+    await storage.activeChallenges.del(challengeId);
+    await recordFailure(`${clientKey}:verify`);
     return res.status(400).json({ ok: false, error: "Challenge expired" });
   }
 
@@ -363,20 +353,20 @@ app.post("/api/verify", (req, res) => {
   const submittedAnswer = challenge.type === "slider" ? submittedSlider : submittedTyped.toLowerCase();
 
   if (!submittedAnswer) {
-    recordFailure(`${clientKey}:verify`);
+    await recordFailure(`${clientKey}:verify`);
     return res.status(400).json({ ok: false, error: "An answer is required" });
   }
 
   if (submittedAnswer !== challenge.answer) {
-    recordFailure(`${clientKey}:verify`);
+    await recordFailure(`${clientKey}:verify`);
     return res.status(400).json({ ok: false, error: "Answer does not match the challenge" });
   }
 
-  const token = issueSuccessToken(challenge, submittedAnswer);
+  const token = await issueSuccessToken(challenge, submittedAnswer);
   challenge.solved = true;
   challenge.issuedTo = sessionId;
-  activeChallenges.delete(challengeId);
-  clearFailures(`${clientKey}:verify`);
+  await storage.activeChallenges.del(challengeId);
+  await clearFailures(`${clientKey}:verify`);
 
   const redirectUrl = redirectMode ? `${config.redirect.path}?token=${encodeURIComponent(token)}` : null;
 
@@ -388,9 +378,9 @@ app.post("/api/verify", (req, res) => {
   });
 });
 
-app.get(config.redirect.path, (req, res) => {
+app.get(config.redirect.path, async (req, res) => {
   const token = req.query.token;
-  const verification = verifySuccessToken(token);
+  const verification = await verifySuccessToken(token);
 
   if (!verification.ok) {
     return res.status(400).send(`
@@ -416,7 +406,7 @@ app.get(config.redirect.path, (req, res) => {
     `);
   }
 
-  const record = issuedTokens.get(token);
+  const record = await storage.issuedTokens.get(token);
   const sessionId = getCookie(req, "tell-me.session");
 
   if (!record || record.used) {
@@ -467,7 +457,7 @@ app.get(config.redirect.path, (req, res) => {
     `);
   }
 
-  issuedTokens.set(token, { ...record, used: true });
+  await storage.issuedTokens.set(token, { ...record, used: true });
 
   return res.send(`
     <!doctype html>
@@ -492,6 +482,29 @@ app.get(config.redirect.path, (req, res) => {
   `);
 });
 
-app.listen(config.port, () => {
-  console.log(`Tell Me demo running on http://localhost:${config.port}`);
+async function start() {
+  storage = await createStorage();
+
+  setInterval(() => {
+    pruneState().catch((error) => {
+      console.error("State prune failed:", error);
+    });
+  }, Math.min(cleanupIntervals.activeChallengesMs, cleanupIntervals.issuedTokensMs, cleanupIntervals.requestBucketsMs, cleanupIntervals.failureBucketsMs)).unref();
+
+  const server = app.listen(config.port, () => {
+    console.log(`Tell Me demo running on http://localhost:${config.port}`);
+  });
+
+  const shutdown = async () => {
+    server.close(() => {});
+    await storage.close();
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+start().catch((error) => {
+  console.error(error);
+  process.exit(1);
 });

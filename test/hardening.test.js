@@ -113,8 +113,19 @@ function sleep(ms) {
   });
   statsDisclosureServer.stderr.on("data", (chunk) => process.stderr.write(chunk));
 
+  const statsServerReady = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("stats server did not start")), 10000);
+    statsDisclosureServer.stdout.on("data", (chunk) => {
+      if (chunk.toString().includes(`Tell Me demo running on http://localhost:${TEST_PORT + 1}`)) {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+    statsDisclosureServer.on("exit", (code) => reject(new Error(`stats server exited early with code ${code}`)));
+  });
+
   try {
-    await waitForServerReady(server, TEST_PORT);
+    await Promise.all([waitForServerReady(server, TEST_PORT), statsServerReady]);
 
     const clientA = createClient();
     const clientB = createClient();
@@ -124,17 +135,6 @@ function sleep(ms) {
     assert.strictEqual(JSON.parse(statsResponse.body).ok, false);
 
     const statsDisclosureClient = createClient(TEST_PORT + 1);
-
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("stats server did not start")), 10000);
-      statsDisclosureServer.stdout.on("data", (chunk) => {
-        if (chunk.toString().includes(`Tell Me demo running on http://localhost:${TEST_PORT + 1}`)) {
-          clearTimeout(timeout);
-          resolve();
-        }
-      });
-      statsDisclosureServer.on("exit", (code) => reject(new Error(`stats server exited early with code ${code}`)));
-    });
 
     const disclosedStats = await statsDisclosureClient.request("/api/stats");
     assert.strictEqual(disclosedStats.status, 200);
