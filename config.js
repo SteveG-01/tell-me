@@ -29,7 +29,11 @@ const config = {
   },
 
   security: {
-    secret: process.env.CHALLENGE_SECRET || "dev-secret-change-me",
+    secret:
+      process.env.CHALLENGE_SECRET ||
+      (process.env.NODE_ENV === "production" ? (() => {
+        throw new Error("CHALLENGE_SECRET must be set in production");
+      })() : "dev-secret-change-me"),
   },
 
   publicDir: path.join(__dirname, "public"),

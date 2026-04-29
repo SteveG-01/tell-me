@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node -e \"console.log('no tests configured')\""
+    "test": "node test/hardening.test.js"
   },
   "keywords": [
     "captcha",
